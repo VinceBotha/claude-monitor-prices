@@ -1,0 +1,75 @@
+name: Check prices
+
+# Daily: compare prices.json with Anthropic's public pricing page and open a PR when
+# they differ, so every price change is reviewed before Claude Monitor installs pick it up.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-prices
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Parser tests
+        run: python3 -I -m unittest discover -s tests -v
+      - name: prices.json is valid
+        run: |
+          python3 -I - <<'EOF'
+          import json, math
+          d = json.load(open("prices.json", encoding="utf-8"))
+          assert d["schema"] == 1 and d["currency"] == "USD", "schema 1, USD"
+          fields = {"input", "output", "cacheW5m", "cacheW1h", "cacheRead"}
+          assert 5 <= len(d["models"]) <= 500, "model count"
+          for m, p in d["models"].items():
+              assert m.startswith("claude-") and set(p) == fields, m
+              assert all(isinstance(v, (int, float)) and math.isfinite(v) and 0 <= v <= 1000 for v in p.values()), m
+          print(f"{len(d['models'])} models OK")
+          EOF
+
+  check:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Compare with the pricing page
+        run: |
+          open=$(gh pr list --state open --json headRefName -q '[.[] | select(.headRefName | startswith("price-update/"))] | length')
+          if [ "$open" != "0" ]; then
+            echo "A price update PR is already open; review that one first."
+            exit 0
+          fi
+          set +e
+          python3 -I scripts/check_prices.py --write
+          code=$?
+          set -e
+          if [ "$code" = "0" ]; then exit 0; fi
+          if [ "$code" != "1" ]; then
+            echo "::error::Couldn't read Anthropic's pricing page. Its layout may have changed; update scripts/check_prices.py."
+            exit "$code"
+          fi
+          branch="price-update/$(date -u +%F)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add prices.json
+          git commit -m "Update prices from Anthropic's pricing page"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" --title "Price update $(date -u +%F)" --body-file changes.md
