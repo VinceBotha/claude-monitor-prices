@@ -18,7 +18,8 @@ import sys
 from pathlib import Path
 
 FIELDS = {"input", "output", "cacheW5m", "cacheW1h", "cacheRead"}
-MODEL_ID = re.compile(r"^claude-[a-z0-9.-]+$")
+MODEL_ID = re.compile(r"claude-[a-z0-9.-]+")
+DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 MAX_PRICE = 1000.0
 MAX_MODELS = 500
 
@@ -28,12 +29,18 @@ def problems(data: object) -> list[str]:
     if not isinstance(data, dict):
         return ["not a JSON object"]
     out = []
-    if data.get("schema") != 1:
+    # `is int`: True and 1.0 equal 1 in Python, but the app (serde u32) rejects them.
+    schema = data.get("schema")
+    if type(schema) is not int or schema != 1:
         out.append("schema must be 1")
     if data.get("currency") != "USD":
         out.append("currency must be USD")
+    # fromisoformat also takes 20261105 and 2026-W45-4; the app only takes YYYY-MM-DD.
+    updated = data.get("updated")
     try:
-        dt.date.fromisoformat(str(data.get("updated")))
+        if not (isinstance(updated, str) and DATE.fullmatch(updated)):
+            raise ValueError(updated)
+        dt.date.fromisoformat(updated)
     except ValueError:
         out.append("updated must be a YYYY-MM-DD date")
     models = data.get("models")
@@ -45,7 +52,8 @@ def problems(data: object) -> list[str]:
 
 
 def model_problems(model: str, p: object) -> list[str]:
-    if not (8 <= len(model) <= 100 and MODEL_ID.match(model)):
+    # fullmatch: `$` in match() would also accept a trailing newline.
+    if not (8 <= len(model) <= 100 and MODEL_ID.fullmatch(model)):
         return [f"{model}: invalid model id"]
     if not isinstance(p, dict) or set(p) != FIELDS:
         return [f"{model}: needs exactly {sorted(FIELDS)}"]
