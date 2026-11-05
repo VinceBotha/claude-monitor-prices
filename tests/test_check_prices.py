@@ -9,8 +9,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-import check_prices as cp  # noqa: E402
-import validate_prices  # noqa: E402
+import check_prices as cp
+import validate_prices
 
 PAGE = """# Pricing
 

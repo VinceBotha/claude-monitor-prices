@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-import validate_prices as vp  # noqa: E402
+import validate_prices as vp
 
 GOOD = {"input": 4, "output": 20, "cacheW5m": 5, "cacheW1h": 8, "cacheRead": 0.2}
 
@@ -38,6 +38,15 @@ class ValidateTests(unittest.TestCase):
         self.assertIn("updated must be a YYYY-MM-DD date", vp.problems(doc(updated="soon")))
         self.assertTrue(vp.problems(doc(models={})))
         self.assertTrue(vp.problems(doc(models=[1])))
+
+    def test_matches_the_apps_stricter_parsing(self):
+        # Each of these passes a loose Python check but the app rejects it.
+        self.assertIn("schema must be 1", vp.problems(doc(schema=True)))
+        self.assertIn("schema must be 1", vp.problems(doc(schema=1.0)))
+        for date in ["20261105", "2026-W45-4", "2026-11-5", "2026-13-01", 20261105]:
+            with self.subTest(date=date):
+                self.assertIn("updated must be a YYYY-MM-DD date", vp.problems(doc(updated=date)))
+        self.assertEqual(len(vp.problems(doc(models={"claude-x-1\n": GOOD}))), 1)
 
     def test_model_rules(self):
         cases = {
