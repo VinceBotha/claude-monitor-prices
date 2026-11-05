@@ -2,6 +2,7 @@ name: Check prices
 
 # Daily: compare prices.json with Anthropic's public pricing page and open a PR when
 # they differ, so every price change is reviewed before Claude Monitor installs pick it up.
+# `main` is protected: changes land only through a PR whose `test` check passed.
 on:
   schedule:
     - cron: "17 6 * * *"
@@ -14,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: check-prices
+  group: check-prices-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -22,29 +23,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - name: Parser tests
+      - name: Script tests
         run: python3 -I -m unittest discover -s tests -v
-      - name: prices.json is valid
-        run: |
-          python3 -I - <<'EOF'
-          import json, math
-          d = json.load(open("prices.json", encoding="utf-8"))
-          assert d["schema"] == 1 and d["currency"] == "USD", "schema 1, USD"
-          fields = {"input", "output", "cacheW5m", "cacheW1h", "cacheRead"}
-          assert 5 <= len(d["models"]) <= 500, "model count"
-          for m, p in d["models"].items():
-              assert m.startswith("claude-") and set(p) == fields, m
-              assert all(isinstance(v, (int, float)) and math.isfinite(v) and 0 <= v <= 1000 for v in p.values()), m
-          print(f"{len(d['models'])} models OK")
-          EOF
+      - name: prices.json passes the app's rules
+        run: python3 -I scripts/validate_prices.py
 
   check:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Only from main: a run dispatched on a price-update branch just runs `test` for its PR.
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
+      actions: write
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -65,6 +57,8 @@ jobs:
             echo "::error::Couldn't read Anthropic's pricing page. Its layout may have changed; update scripts/check_prices.py."
             exit "$code"
           fi
+          # Never propose a file the app would reject.
+          python3 -I scripts/validate_prices.py
           branch="price-update/$(date -u +%F)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -73,3 +67,6 @@ jobs:
           git commit -m "Update prices from Anthropic's pricing page"
           git push origin "$branch"
           gh pr create --base main --head "$branch" --title "Price update $(date -u +%F)" --body-file changes.md
+          # PRs opened with GITHUB_TOKEN don't trigger pull_request runs; a dispatch does,
+          # so the required `test` check runs on the PR's commit.
+          gh workflow run check-prices.yml --ref "$branch"

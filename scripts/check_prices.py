@@ -24,10 +24,11 @@ from pathlib import Path
 
 PAGE_URL = "https://platform.claude.com/docs/en/about-claude/pricing.md"
 SOURCE_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
+# The repo root; tests point it at a temporary folder.
 ROOT = Path(__file__).resolve().parent.parent
-PRICES = ROOT / "prices.json"
 FIELDS = ("input", "output", "cacheW5m", "cacheW1h", "cacheRead")
-# The page table's column order after the model name.
+# The page table's columns, and the field each price column maps to.
+HEADER = ["model", "base input tokens", "5m cache writes", "1h cache writes", "cache hits and refreshes", "output tokens"]
 PAGE_COLUMNS = ("input", "cacheW5m", "cacheW1h", "cacheRead", "output")
 # A real table lists far more; fewer means the page layout changed and parsing went wrong.
 MIN_MODELS = 5
@@ -60,41 +61,39 @@ def money(cell: str) -> float:
     if not m:
         raise ParseError(f"not a price: {cell!r}")
     value = float(m.group(1))
-    if not 0 <= value <= MAX_PRICE:
+    if value > MAX_PRICE:
         raise ParseError(f"price out of range: {cell!r}")
     return value
 
 
-def parse_page(markdown: str) -> dict[str, dict[str, float]]:
-    """The first table under '## Model pricing', as {model id: prices}."""
-    start = markdown.find("## Model pricing")
+def section_table(markdown: str, heading: str) -> list[list[str]]:
+    """The cells of the first markdown table under `heading`, header row included."""
+    start = markdown.find(heading)
     if start < 0:
-        raise ParseError("no '## Model pricing' section")
-    lines = markdown[start:].splitlines()[1:]
+        raise ParseError(f"no '{heading}' section")
     rows: list[list[str]] = []
-    in_table = False
-    for line in lines:
+    for line in markdown[start:].splitlines()[1:]:
         if line.startswith("|"):
-            in_table = True
             rows.append([c.strip() for c in line.strip().strip("|").split("|")])
-        elif in_table:
+        elif rows or line.startswith("## "):
             break
-        elif line.startswith("## "):
-            break
+    return rows
+
+
+def parse_page(markdown: str) -> dict[str, dict[str, float]]:
+    """The table under '## Model pricing', as {model id: prices}."""
+    rows = section_table(markdown, "## Model pricing")
     if len(rows) < 3:
         raise ParseError("no pricing table")
-    header = [h.lower() for h in rows[0]]
-    expected = ["model", "base input tokens", "5m cache writes", "1h cache writes", "cache hits and refreshes", "output tokens"]
-    if header != expected:
+    if [h.lower() for h in rows[0]] != HEADER:
         raise ParseError(f"unexpected columns: {rows[0]}")
     out: dict[str, dict[str, float]] = {}
     for row in rows[2:]:
-        if len(row) != len(expected):
+        if len(row) != len(HEADER):
             raise ParseError(f"bad row: {row}")
         mid = model_id(row[0])
-        if mid is None:
-            continue
-        out[mid] = {col: money(cell) for col, cell in zip(PAGE_COLUMNS, row[1:])}
+        if mid is not None:
+            out[mid] = {col: money(cell) for col, cell in zip(PAGE_COLUMNS, row[1:])}
     if len(out) < MIN_MODELS:
         raise ParseError(f"only {len(out)} models parsed")
     return out
@@ -115,9 +114,26 @@ def diff(current: dict[str, dict[str, float]], page: dict[str, dict[str, float]]
 
 
 def fetch(url: str) -> str:
+    if not url.startswith("https://"):
+        raise ValueError(f"not an https URL: {url}")
     req = urllib.request.Request(url, headers={"User-Agent": "claude-monitor-prices-check"})
-    with urllib.request.urlopen(req, timeout=30) as r:
+    # Only ever called with the constant https PAGE_URL (checked above), never with user input.
+    with urllib.request.urlopen(req, timeout=30) as r:  # nosec B310
         return r.read(2_000_000).decode("utf-8")
+
+
+def write(data: dict, page: dict[str, dict[str, float]], changes: list[str]) -> None:
+    """Merges the page into prices.json (keeping models it no longer lists) and writes changes.md."""
+    models = {**data["models"], **page}
+    data["models"] = {k: {f: models[k][f] for f in FIELDS} for k in sorted(models)}
+    data["updated"] = dt.date.today().isoformat()
+    data["source"] = SOURCE_URL
+    (ROOT / "prices.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    (ROOT / "changes.md").write_text(
+        f"Anthropic's [pricing page]({SOURCE_URL}) differs from `prices.json`:\n\n" + "\n".join(changes) + "\n\n"
+        "Check the values against the page before merging. Once merged, Claude Monitor picks them up within a day.\n",
+        encoding="utf-8",
+    )
 
 
 def main(argv: list[str]) -> int:
@@ -128,27 +144,18 @@ def main(argv: list[str]) -> int:
     try:
         page_md = Path(args.page).read_text(encoding="utf-8") if args.page else fetch(PAGE_URL)
         page = parse_page(page_md)
-    except (ParseError, OSError) as e:
+    except (ParseError, OSError, ValueError) as e:
         print(f"Couldn't read the pricing page: {e}", file=sys.stderr)
         return 2
 
-    data = json.loads(PRICES.read_text(encoding="utf-8"))
+    data = json.loads((ROOT / "prices.json").read_text(encoding="utf-8"))
     changes = diff(data["models"], page)
     if not changes:
         print("prices.json matches the pricing page.")
         return 0
     print("\n".join(changes))
     if args.write:
-        models = {**data["models"], **page}
-        data["models"] = {k: models[k] for k in sorted(models)}
-        data["updated"] = dt.date.today().isoformat()
-        data["source"] = SOURCE_URL
-        PRICES.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        (ROOT / "changes.md").write_text(
-            f"Anthropic's [pricing page]({SOURCE_URL}) differs from `prices.json`:\n\n" + "\n".join(changes) + "\n\n"
-            "Check the values against the page before merging. Once merged, Claude Monitor picks them up within a day.\n",
-            encoding="utf-8",
-        )
+        write(data, page, changes)
     return 1
 
 
